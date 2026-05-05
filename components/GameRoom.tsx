@@ -59,7 +59,6 @@ export default function GameRoom({ roomId }: Props) {
   // throttled state version that drives React re-renders for the HUD/score
   const [tick, setTick] = useState(0);
 
-  const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const fxRef = useRef<CanvasFx | null>(null);
   const stateRef = useRef<GameState>(freshGame());
   const peerRef = useRef<PeerHandle | null>(null);
@@ -563,8 +562,8 @@ export default function GameRoom({ roomId }: Props) {
         {/* TOP feed */}
         <div className="relative w-full flex-1 overflow-hidden">
           <VideoFeed
-            ref={isHost ? localVideoRef : null}
             stream={topStream}
+            feed={isHost ? "local" : "remote"}
             mirror
           />
           <div className="absolute top-2 left-2 z-20 text-[10px] font-mono tracking-[0.3em] px-2 py-1 bg-black/60 border border-cyber-pink/60 text-cyber-pink">
@@ -577,8 +576,8 @@ export default function GameRoom({ roomId }: Props) {
         {/* BOTTOM feed */}
         <div className="relative w-full flex-1 overflow-hidden">
           <VideoFeed
-            ref={!isHost ? localVideoRef : null}
             stream={bottomStream}
+            feed={isHost ? "remote" : "local"}
             mirror
           />
           <div className="absolute bottom-2 left-2 z-20 text-[10px] font-mono tracking-[0.3em] px-2 py-1 bg-black/60 border border-cyber-cyan/60 text-cyber-cyan">
