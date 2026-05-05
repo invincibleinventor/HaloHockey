@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useRouter, useSearchParams } from "next/navigation";
 import GameCanvas, { CanvasFx } from "./GameCanvas";
 import Particles from "./Particles";
+import VideoFeed from "./VideoFeed";
 import { HandStream, HandSample } from "@/lib/handTracker";
 import {
   ARENA,
@@ -30,6 +31,7 @@ type ConnState =
   | "waiting"
   | "connecting"
   | "ready"
+  | "peerLeft"
   | "error";
 
 interface Props {
@@ -44,16 +46,17 @@ export default function GameRoom({ roomId }: Props) {
 
   const [conn, setConn] = useState<ConnState>("init");
   const [error, setError] = useState<string | null>(null);
-  const [actualRoomId, setActualRoomId] = useState<string | null>(roomId);
   const [diag, setDiag] = useState<string>("");
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  // throttled state version that drives React re-renders for the HUD/score
+  const [tick, setTick] = useState(0);
 
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const fxRef = useRef<CanvasFx | null>(null);
   const stateRef = useRef<GameState>(freshGame());
   const peerRef = useRef<PeerHandle | null>(null);
   const handStreamRef = useRef<HandStream | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
   const remoteSampleRef = useRef<HandSample>({
     x: 0.5,
     y: 0.5,
@@ -64,7 +67,13 @@ export default function GameRoom({ roomId }: Props) {
     top: { x: 0.5, y: ARENA.TOP_LINE + ARENA.PADDLE_R },
     bot: { x: 0.5, y: ARENA.BOTTOM_LINE - ARENA.PADDLE_R },
   });
-  const [, forceRender] = useState(0);
+  const goalServeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+    null
+  );
+  const failTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const peerEverConnectedRef = useRef(false);
+  const leftIntentionallyRef = useRef(false);
 
   // ---- BOOT: get camera & wire peer ----
   useEffect(() => {
@@ -79,7 +88,7 @@ export default function GameRoom({ roomId }: Props) {
           !navigator.mediaDevices.getUserMedia
         ) {
           throw new Error(
-            "Camera unavailable on this page. Open the app over HTTPS (or localhost). Phones browsing your laptop's LAN IP over plain http:// will hit this — use `npm run dev:https`, ngrok, or deploy to Vercel."
+            "Camera unavailable on this page. Camera APIs only work over HTTPS or localhost. If you're on a phone hitting a laptop's LAN IP over plain http://, use the Vercel deployment or `npm run dev:https`."
           );
         }
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -95,26 +104,10 @@ export default function GameRoom({ roomId }: Props) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
-        localStreamRef.current = stream;
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
-          await localVideoRef.current.play().catch(() => {});
-        }
+        setLocalStream(stream);
 
-        // start hand tracking on local video once ready
-        const hs = new HandStream(localVideoRef.current!);
-        handStreamRef.current = hs;
-        hs.start().catch((e) => {
-          console.error("hand tracker init failed", e);
-          setError("Hand tracker failed to load. Refresh and try again.");
-        });
+        const onTrack = (s: MediaStream) => setRemoteStream(s);
 
-        const onTrack = (s: MediaStream) => {
-          if (remoteVideoRef.current) {
-            remoteVideoRef.current.srcObject = s;
-            remoteVideoRef.current.play().catch(() => {});
-          }
-        };
         const onMessage = (msg: any) => {
           if (msg.t === "hand") {
             remoteSampleRef.current = {
@@ -124,12 +117,10 @@ export default function GameRoom({ roomId }: Props) {
               landmarks: 21,
             };
           } else if (msg.t === "puck" && !isHost) {
-            // guest applies authoritative state from host with soft snap
             const s = stateRef.current;
             const dx = msg.px - s.puck.x;
             const dy = msg.py - s.puck.y;
             const distSq = dx * dx + dy * dy;
-            // big jump (e.g. after a goal serve) -> hard snap; otherwise lerp
             if (distSq > 0.04) {
               s.puck.x = msg.px;
               s.puck.y = msg.py;
@@ -139,7 +130,6 @@ export default function GameRoom({ roomId }: Props) {
             }
             s.puck.vx = msg.vx;
             s.puck.vy = msg.vy;
-            // top paddle: also soft-lerp so it doesn't snap at 30Hz
             s.topPaddle.x += (msg.tx - s.topPaddle.x) * 0.6;
             s.topPaddle.y += (msg.ty - s.topPaddle.y) * 0.6;
             s.topScore = msg.ts;
@@ -147,7 +137,6 @@ export default function GameRoom({ roomId }: Props) {
             s.status = msg.st;
             s.lastScorer = msg.ls ?? null;
           } else if (msg.t === "score" && !isHost) {
-            // VFX trigger from host
             if (msg.who === "top") {
               fxRef.current?.burst(0.5, 0.05, "#ff2bd6", 80);
               fxRef.current?.flash("rgba(255,43,214,0.8)");
@@ -157,51 +146,74 @@ export default function GameRoom({ roomId }: Props) {
             }
             fxRef.current?.shake(22, 480);
             sfx.goal();
-          } else if (msg.t === "ready") {
-            // both ready — host starts countdown
-            if (isHost) startCountdown();
-          } else if (msg.t === "reset" && !isHost) {
-            // host restarted
+          } else if (msg.t === "leave") {
+            // graceful disconnect from peer
+            setConn("peerLeft");
           }
-        };
-        const onOpen = () => {
-          setConn("ready");
-          // tell peer we're ready
-          if (peerRef.current) sendDc(peerRef.current, { t: "ready" });
-        };
-        const onClose = () => {
-          setConn("connecting");
         };
 
-        let failTimer: ReturnType<typeof setTimeout> | null = null;
-        let restartedOnce = false;
-        const clearFail = () => {
-          if (failTimer) {
-            clearTimeout(failTimer);
-            failTimer = null;
+        const onOpen = () => {
+          peerEverConnectedRef.current = true;
+          setConn("ready");
+          // clear any pending fail timer
+          if (failTimerRef.current) {
+            clearTimeout(failTimerRef.current);
+            failTimerRef.current = null;
           }
         };
+        const onClose = () => {
+          if (leftIntentionallyRef.current) return;
+          if (peerEverConnectedRef.current) {
+            setConn("peerLeft");
+          } else {
+            setConn("connecting");
+          }
+        };
+
+        let restartedOnce = false;
         const onState = (label: string) => {
           setDiag(label);
-          // recovery on transient ICE failure: try ICE restart once (host only)
-          if ((label === "ice:failed" || label === "pc:failed") && !restartedOnce) {
-            if (isHost && peerRef.current) {
+          if (
+            (label === "ice:failed" ||
+              label === "pc:failed" ||
+              label === "ice:disconnected") &&
+            !peerEverConnectedRef.current
+          ) {
+            // never connected — try ICE restart on host, then 10s grace
+            if (
+              isHost &&
+              !restartedOnce &&
+              peerRef.current &&
+              label === "ice:failed"
+            ) {
               restartedOnce = true;
               try {
                 (peerRef.current.pc as any).restartIce?.();
               } catch {}
             }
-            // give it 8s to recover before declaring fatal
-            clearFail();
-            failTimer = setTimeout(() => {
+            if (failTimerRef.current) clearTimeout(failTimerRef.current);
+            failTimerRef.current = setTimeout(() => {
               setError(
-                "Couldn't establish a peer connection. On cellular / strict NATs you usually need a TURN server. Add NEXT_PUBLIC_TURN_URL / _USERNAME / _CREDENTIAL to .env.local (free TURN: metered.ca) and reload."
+                "Couldn't establish a peer connection. WebRTC needs a TURN relay across strict NATs (e.g. cellular, different ISPs). The free OpenRelay fallback is built in — if it's blocked or down, sign up free at metered.ca and add NEXT_PUBLIC_TURN_URL / _USERNAME / _CREDENTIAL to your env."
               );
               setConn("error");
-            }, 8000);
+            }, 10000);
           }
-          if (label === "ice:connected" || label === "ice:completed" || label === "dc:open") {
-            clearFail();
+          if (
+            (label === "ice:connected" ||
+              label === "ice:completed" ||
+              label === "dc:open") &&
+            failTimerRef.current
+          ) {
+            clearTimeout(failTimerRef.current);
+            failTimerRef.current = null;
+          }
+          if (
+            (label === "pc:disconnected" || label === "ice:disconnected") &&
+            peerEverConnectedRef.current
+          ) {
+            // already connected before — peer probably left
+            setConn("peerLeft");
           }
         };
 
@@ -219,7 +231,7 @@ export default function GameRoom({ roomId }: Props) {
             return;
           }
           peerRef.current = handle;
-          // strip ?host=1 from the URL so the host can share the bare /room/CODE
+          // strip ?host=1 so host can share bare /room/CODE
           if (typeof window !== "undefined") {
             const u = new URL(window.location.href);
             u.search = "";
@@ -250,26 +262,56 @@ export default function GameRoom({ roomId }: Props) {
 
     return () => {
       cancelled = true;
+      leftIntentionallyRef.current = true;
+      // tell peer we're leaving so they show a clean message immediately
+      try {
+        if (peerRef.current?.dc?.readyState === "open") {
+          peerRef.current.dc.send(JSON.stringify({ t: "leave" }));
+        }
+      } catch {}
+      if (failTimerRef.current) clearTimeout(failTimerRef.current);
+      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+      if (goalServeTimerRef.current) clearTimeout(goalServeTimerRef.current);
       handStreamRef.current?.stop();
       peerRef.current?.cleanup();
-      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      // localStream tracks belong to React state; capture and stop
+      setLocalStream((s) => {
+        s?.getTracks().forEach((t) => t.stop());
+        return null;
+      });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
 
+  // ---- HAND TRACKER: bind to local video element once stream is up ----
+  useEffect(() => {
+    if (!localStream || !localVideoRef.current || handStreamRef.current) return;
+    const hs = new HandStream(localVideoRef.current);
+    handStreamRef.current = hs;
+    hs.start().catch((e) => {
+      console.error("hand tracker init failed", e);
+      setError("Hand tracker failed to load. Refresh and try again.");
+      setConn("error");
+    });
+  }, [localStream]);
+
   // ---- COUNTDOWN ----
   const [countdown, setCountdown] = useState<number | null>(null);
-  function startCountdown() {
+  const startCountdown = useCallback(() => {
     if (stateRef.current.status === "playing") return;
+    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
     stateRef.current = freshGame();
     stateRef.current.status = "countdown";
     let n = 3;
     setCountdown(n);
     sfx.countdown();
-    const id = setInterval(() => {
+    countdownIntervalRef.current = setInterval(() => {
       n -= 1;
       if (n <= 0) {
-        clearInterval(id);
+        if (countdownIntervalRef.current) {
+          clearInterval(countdownIntervalRef.current);
+          countdownIntervalRef.current = null;
+        }
         setCountdown(null);
         stateRef.current.status = "playing";
         serveTowards(stateRef.current, Math.random() < 0.5 ? "top" : "bottom");
@@ -279,13 +321,14 @@ export default function GameRoom({ roomId }: Props) {
         sfx.countdown();
       }
     }, 900);
-  }
+  }, []);
 
-  // ---- GAME LOOP (host runs physics, both render) ----
+  // ---- GAME LOOP ----
   useEffect(() => {
     let raf = 0;
     let lastSend = 0;
     let lastBroadcast = 0;
+    let lastRender = 0;
     let last = performance.now();
 
     const loop = () => {
@@ -294,36 +337,29 @@ export default function GameRoom({ roomId }: Props) {
       last = now;
 
       const s = stateRef.current;
-
-      // 0) snapshot previous paddle positions (for collision velocity transfer)
       const prevTop = { ...prevPaddleRef.current.top };
       const prevBot = { ...prevPaddleRef.current.bot };
 
-      // 1) compute MY paddle from MY hand
       const my = handStreamRef.current?.getSample();
       if (my && my.confidence > 0.05) {
         const mirroredX = 1 - my.x;
         if (selfSide === "top") {
-          const py =
-            ARENA.TOP_LINE + my.y * (1 - ARENA.PADDLE_R - ARENA.TOP_LINE);
           s.topPaddle.x = mirroredX;
-          s.topPaddle.y = py;
+          s.topPaddle.y =
+            ARENA.TOP_LINE + my.y * (1 - ARENA.PADDLE_R - ARENA.TOP_LINE);
           clampTopPaddle(s.topPaddle);
         } else {
-          const py =
-            1 + ARENA.PADDLE_R + my.y * (ARENA.BOTTOM_LINE - 1 - ARENA.PADDLE_R);
           s.bottomPaddle.x = mirroredX;
-          s.bottomPaddle.y = py;
+          s.bottomPaddle.y =
+            1 + ARENA.PADDLE_R + my.y * (ARENA.BOTTOM_LINE - 1 - ARENA.PADDLE_R);
           clampBottomPaddle(s.bottomPaddle);
         }
       }
 
-      // 2) get OPPONENT paddle from remote sample
       const op = remoteSampleRef.current;
       if (op.confidence > 0.05) {
         const mirroredX = 1 - op.x;
         if (selfSide === "top") {
-          // opponent is bottom
           s.bottomPaddle.x = mirroredX;
           s.bottomPaddle.y =
             1 + ARENA.PADDLE_R + op.y * (ARENA.BOTTOM_LINE - 1 - ARENA.PADDLE_R);
@@ -336,7 +372,6 @@ export default function GameRoom({ roomId }: Props) {
         }
       }
 
-      // 3) host runs physics; guest integrates puck locally for smooth motion
       if (isHost) {
         const r = stepPhysics(s, dt, prevTop, prevBot);
 
@@ -346,12 +381,7 @@ export default function GameRoom({ roomId }: Props) {
           sfx.hit();
         }
         if (r.wallHit) {
-          fxRef.current?.burst(
-            s.puck.x,
-            s.puck.y,
-            "#00e5ff",
-            10
-          );
+          fxRef.current?.burst(s.puck.x, s.puck.y, "#00e5ff", 10);
           sfx.wallBounce();
         }
         if (r.goal) {
@@ -361,9 +391,7 @@ export default function GameRoom({ roomId }: Props) {
           s.lastScorer = who;
           s.status = "goal";
           fxRef.current?.flash(
-            who === "top"
-              ? "rgba(255,43,214,0.8)"
-              : "rgba(0,229,255,0.8)"
+            who === "top" ? "rgba(255,43,214,0.8)" : "rgba(0,229,255,0.8)"
           );
           fxRef.current?.shake(24, 520);
           fxRef.current?.burst(
@@ -373,14 +401,13 @@ export default function GameRoom({ roomId }: Props) {
             90
           );
           sfx.goal();
-          if (peerRef.current)
-            sendDc(peerRef.current, { t: "score", who });
+          if (peerRef.current) sendDc(peerRef.current, { t: "score", who });
 
           if (s.topScore >= WIN_SCORE || s.bottomScore >= WIN_SCORE) {
             s.status = "over";
           } else {
-            // serve again after delay, toward the player who just got scored on
-            setTimeout(() => {
+            if (goalServeTimerRef.current) clearTimeout(goalServeTimerRef.current);
+            goalServeTimerRef.current = setTimeout(() => {
               if (stateRef.current.status === "goal") {
                 stateRef.current.status = "playing";
                 serveTowards(stateRef.current, who === "top" ? "bottom" : "top");
@@ -389,7 +416,6 @@ export default function GameRoom({ roomId }: Props) {
           }
         }
       } else if (s.status === "playing") {
-        // guest: integrate puck velocity locally between authoritative updates
         s.puck.x += s.puck.vx * dt;
         s.puck.y += s.puck.vy * dt;
         const damp = Math.pow(0.995, dt * 60);
@@ -397,11 +423,9 @@ export default function GameRoom({ roomId }: Props) {
         s.puck.vy *= damp;
       }
 
-      // remember paddle positions for next frame's velocity calc
       prevPaddleRef.current.top = { ...s.topPaddle };
       prevPaddleRef.current.bot = { ...s.bottomPaddle };
 
-      // 4) send my hand to peer (~30Hz)
       if (peerRef.current && now - lastSend > 33) {
         lastSend = now;
         const me = handStreamRef.current?.getSample();
@@ -415,7 +439,6 @@ export default function GameRoom({ roomId }: Props) {
         }
       }
 
-      // 5) host broadcasts authoritative state ~60Hz
       if (isHost && peerRef.current && now - lastBroadcast > 16) {
         lastBroadcast = now;
         sendDc(peerRef.current, {
@@ -433,7 +456,12 @@ export default function GameRoom({ roomId }: Props) {
         });
       }
 
-      forceRender((n) => (n + 1) % 1000);
+      // throttle React rerenders to ~12Hz; canvas reads state directly via ref
+      if (now - lastRender > 80) {
+        lastRender = now;
+        setTick((t) => (t + 1) & 0xff);
+      }
+
       raf = requestAnimationFrame(loop);
     };
     loop();
@@ -451,60 +479,72 @@ export default function GameRoom({ roomId }: Props) {
     if (!isHost) return;
     sfx.uiClick();
     startCountdown();
-    if (peerRef.current) sendDc(peerRef.current, { t: "reset" });
+  };
+
+  const exit = () => {
+    leftIntentionallyRef.current = true;
+    try {
+      if (peerRef.current?.dc?.readyState === "open") {
+        peerRef.current.dc.send(JSON.stringify({ t: "leave" }));
+      }
+    } catch {}
+    router.push("/");
   };
 
   const s = stateRef.current;
+  // suppress unused-var warnings for the throttled tick state
+  void tick;
+
+  // determine which slot owns the local feed
+  const topStream = isHost ? localStream : remoteStream;
+  const bottomStream = isHost ? remoteStream : localStream;
 
   return (
-    <main className="relative h-screen w-screen overflow-hidden text-white">
+    <main
+      className="relative w-screen overflow-hidden text-white"
+      style={{ height: "100dvh" }}
+    >
       <Particles density={120} />
 
-      {/* GAME ARENA */}
-      <div className="relative z-10 h-full w-full mx-auto max-w-[820px] aspect-[3/5] sm:aspect-auto sm:max-h-[100vh] flex flex-col bg-black/40 border-x border-cyan-400/20">
+      <div
+        className="relative z-10 w-full mx-auto max-w-[820px] flex flex-col bg-black/40 border-x border-cyan-400/20"
+        style={{ height: "100dvh" }}
+      >
         {/* hole strip - top */}
         <div className="relative w-full" style={{ height: "7%" }} />
 
-        {/* top video (host's feed) */}
+        {/* TOP feed */}
         <div className="relative w-full flex-1 overflow-hidden">
-          <video
-            ref={isHost ? localVideoRef : remoteVideoRef}
-            autoPlay
-            playsInline
-            muted
-            className="video-mirror absolute inset-0 w-full h-full object-cover"
+          <VideoFeed
+            ref={isHost ? localVideoRef : null}
+            stream={topStream}
+            mirror
           />
-          {/* feed label */}
           <div className="absolute top-2 left-2 z-20 text-[10px] font-mono tracking-[0.3em] px-2 py-1 bg-black/60 border border-cyber-pink/60 text-cyber-pink">
             {isHost ? "P1 // YOU" : "P1 // OPPONENT"}
           </div>
         </div>
 
-        {/* center divider */}
         <div className="relative w-full h-px bg-gradient-to-r from-transparent via-white/40 to-transparent" />
 
-        {/* bottom video (guest's feed) */}
+        {/* BOTTOM feed */}
         <div className="relative w-full flex-1 overflow-hidden">
-          <video
-            ref={isHost ? remoteVideoRef : localVideoRef}
-            autoPlay
-            playsInline
-            muted
-            className="video-mirror absolute inset-0 w-full h-full object-cover"
+          <VideoFeed
+            ref={!isHost ? localVideoRef : null}
+            stream={bottomStream}
+            mirror
           />
           <div className="absolute bottom-2 left-2 z-20 text-[10px] font-mono tracking-[0.3em] px-2 py-1 bg-black/60 border border-cyber-cyan/60 text-cyber-cyan">
             {isHost ? "P2 // OPPONENT" : "P2 // YOU"}
           </div>
         </div>
 
-        {/* hole strip - bottom */}
         <div className="relative w-full" style={{ height: "7%" }} />
 
-        {/* GAME CANVAS OVERLAY */}
         <GameCanvas read={read} selfSide={selfSide} fxRef={fxRef} holeFraction={0.07} />
 
-        {/* HUD: top status bar */}
-        <div className="absolute top-1 left-1/2 -translate-x-1/2 z-40 flex gap-3 items-center text-[10px] font-mono tracking-[0.3em] pointer-events-none">
+        {/* HUD */}
+        <div className="absolute top-1 left-1/2 -translate-x-1/2 z-40 flex gap-2 items-center text-[10px] font-mono tracking-[0.3em] pointer-events-none">
           <span
             className={
               "px-2 py-0.5 border " +
@@ -515,9 +555,9 @@ export default function GameRoom({ roomId }: Props) {
           >
             ◉ {conn.toUpperCase()}
           </span>
-          {actualRoomId && (
+          {roomId && (
             <span className="px-2 py-0.5 border border-white/40 text-white">
-              ROOM&nbsp;{actualRoomId}
+              ROOM&nbsp;{roomId}
             </span>
           )}
           {diag && conn !== "ready" && (
@@ -527,14 +567,17 @@ export default function GameRoom({ roomId }: Props) {
           )}
         </div>
 
-        {/* WAITING / COUNTDOWN / WIN OVERLAY */}
+        {/* WAITING / CONNECTING OVERLAY */}
         <AnimatePresence>
-          {conn !== "ready" && conn !== "error" && (
+          {(conn === "init" ||
+            conn === "permissions" ||
+            conn === "waiting" ||
+            conn === "connecting") && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 z-50 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center gap-6 pointer-events-auto"
+              className="absolute inset-0 z-50 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center gap-6 pointer-events-auto p-6 text-center"
             >
               <div className="text-cyber-cyan text-xs font-mono tracking-[0.5em]">
                 {conn === "permissions"
@@ -545,42 +588,56 @@ export default function GameRoom({ roomId }: Props) {
                   ? "ESTABLISHING LINK"
                   : "BOOTING"}
               </div>
-              {actualRoomId && conn === "waiting" && (
+              {roomId && conn === "waiting" && (
                 <>
                   <div className="text-fuchsia-300 text-xs font-mono tracking-[0.4em]">
                     SHARE THIS CODE WITH YOUR FRIEND
                   </div>
                   <motion.div
-                    initial={{ scale: 0.8 }}
+                    initial={{ scale: 0.85 }}
                     animate={{ scale: 1 }}
-                    className="font-display text-5xl sm:text-6xl font-black text-cyber-pink neon-text tracking-[0.4em] cursor-pointer max-w-full break-all text-center px-4"
+                    className="font-display text-5xl sm:text-6xl font-black text-cyber-pink neon-text tracking-[0.4em] cursor-pointer max-w-full break-all px-4"
                     style={{
                       textShadow:
                         "0 0 12px #ff2bd6, 0 0 32px #ff2bd6, 0 0 64px #ff2bd6",
                     }}
                     onClick={() => {
-                      navigator.clipboard
-                        .writeText(actualRoomId)
-                        .catch(() => {});
+                      navigator.clipboard.writeText(roomId).catch(() => {});
                       sfx.uiClick();
                     }}
                     title="Click to copy"
                   >
-                    {actualRoomId}
+                    {roomId}
                   </motion.div>
                   <div className="text-cyan-300/60 text-[10px] font-mono tracking-[0.3em]">
-                    OR SHARE LINK · click code to copy
+                    click code to copy
                   </div>
                 </>
               )}
-              <div className="flex gap-3 mt-4">
-                <button
-                  onClick={() => router.push("/")}
-                  className="btn-arcade text-cyan-300/80 text-sm"
-                >
-                  ◂ EXIT
-                </button>
+              <button onClick={exit} className="btn-arcade text-cyan-300/80 text-sm mt-2">
+                ◂ EXIT
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* PEER LEFT */}
+        <AnimatePresence>
+          {conn === "peerLeft" && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md flex flex-col items-center justify-center gap-4 p-6 text-center"
+            >
+              <div className="text-cyber-pink text-2xl font-display tracking-widest">
+                OPPONENT LEFT
               </div>
+              <div className="text-white/60 text-xs max-w-md">
+                The other player closed their tab or lost their connection.
+              </div>
+              <button onClick={exit} className="btn-arcade text-cyber-pink mt-4">
+                ◂ BACK TO LOBBY
+              </button>
             </motion.div>
           )}
         </AnimatePresence>
@@ -591,23 +648,20 @@ export default function GameRoom({ roomId }: Props) {
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              className="absolute inset-0 z-50 bg-black/85 flex flex-col items-center justify-center gap-4 p-6 text-center"
+              className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md flex flex-col items-center justify-center gap-4 p-6 text-center"
             >
               <div className="text-cyber-red text-2xl font-display tracking-widest">
                 CONNECTION FAILED
               </div>
               <div className="text-white/70 max-w-md text-sm">{error}</div>
-              <button
-                onClick={() => router.push("/")}
-                className="btn-arcade text-cyber-pink mt-4"
-              >
+              <button onClick={exit} className="btn-arcade text-cyber-pink mt-4">
                 ◂ BACK TO LOBBY
               </button>
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* READY-TO-START prompt for host */}
+        {/* READY-TO-START */}
         <AnimatePresence>
           {conn === "ready" && s.status === "lobby" && (
             <motion.div
@@ -654,8 +708,7 @@ export default function GameRoom({ roomId }: Props) {
               <div
                 className="font-display text-[20vh] font-black text-cyber-pink neon-text"
                 style={{
-                  textShadow:
-                    "0 0 24px #ff2bd6, 0 0 64px #ff2bd6, 0 0 128px #ff2bd6",
+                  textShadow: "0 0 24px #ff2bd6, 0 0 64px #ff2bd6, 0 0 128px #ff2bd6",
                 }}
               >
                 {countdown}
@@ -664,7 +717,7 @@ export default function GameRoom({ roomId }: Props) {
           )}
         </AnimatePresence>
 
-        {/* GOAL FLASH TEXT */}
+        {/* GOAL */}
         <AnimatePresence>
           {s.status === "goal" && s.lastScorer && (
             <motion.div
@@ -688,13 +741,13 @@ export default function GameRoom({ roomId }: Props) {
           )}
         </AnimatePresence>
 
-        {/* WIN OVERLAY */}
+        {/* WIN */}
         <AnimatePresence>
           {s.status === "over" && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              className="absolute inset-0 z-50 bg-black/80 backdrop-blur-md flex flex-col items-center justify-center gap-4"
+              className="absolute inset-0 z-50 bg-black/80 backdrop-blur-md flex flex-col items-center justify-center gap-4 p-6 text-center"
             >
               <div className="text-white/70 text-xs font-mono tracking-[0.5em]">
                 MATCH OVER
@@ -721,10 +774,7 @@ export default function GameRoom({ roomId }: Props) {
                     ▸ REMATCH
                   </button>
                 )}
-                <button
-                  onClick={() => router.push("/")}
-                  className="btn-arcade text-cyan-300 text-lg"
-                >
+                <button onClick={exit} className="btn-arcade text-cyan-300 text-lg">
                   ◂ EXIT
                 </button>
               </div>

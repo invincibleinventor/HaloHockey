@@ -17,7 +17,6 @@ function buildIceServers(): RTCIceServer[] {
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun2.l.google.com:19302" },
   ];
-  // optional TURN from NEXT_PUBLIC_TURN_URL / NEXT_PUBLIC_TURN_USERNAME / NEXT_PUBLIC_TURN_CREDENTIAL
   const turnUrl = process.env.NEXT_PUBLIC_TURN_URL;
   const turnUser = process.env.NEXT_PUBLIC_TURN_USERNAME;
   const turnCred = process.env.NEXT_PUBLIC_TURN_CREDENTIAL;
@@ -26,6 +25,18 @@ function buildIceServers(): RTCIceServer[] {
       urls: turnUrl.split(",").map((s) => s.trim()),
       username: turnUser,
       credential: turnCred,
+    });
+  } else {
+    // Free-tier fallback: metered.ca OpenRelay public TURN.
+    // Best-effort, rate-limited; override via NEXT_PUBLIC_TURN_* for production.
+    servers.push({
+      urls: [
+        "turn:openrelay.metered.ca:80",
+        "turn:openrelay.metered.ca:443",
+        "turn:openrelay.metered.ca:443?transport=tcp",
+      ],
+      username: "openrelayproject",
+      credential: "openrelayproject",
     });
   }
   return servers;
@@ -206,9 +217,12 @@ export async function joinRoom(
 
   const roomRef = doc(db, "rooms", roomId);
   const snap = await getDoc(roomRef);
-  if (!snap.exists()) throw new Error("Room not found");
+  if (!snap.exists()) throw new Error("Room not found.");
   const data = snap.data();
-  if (!data.offer) throw new Error("Room is not ready");
+  if (!data.offer) throw new Error("Room is not ready yet.");
+  if (data.answer || data.status === "active") {
+    throw new Error("This room is already full.");
+  }
 
   const pc = new RTCPeerConnection(RTC_CONFIG);
   const remoteStream = new MediaStream();

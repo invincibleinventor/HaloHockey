@@ -2,9 +2,16 @@ import "./globals.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "NEON SLAM // Air Hockey IRL",
+  title: "HALO HOCKEY // Camera-fed Air Hockey",
   description:
     "Two-player WebRTC air hockey controlled with your hands. Camera-fed, computer-vision powered, deeply VFX'd.",
+};
+
+export const viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover" as const,
+  themeColor: "#05010d",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

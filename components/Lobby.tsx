@@ -43,18 +43,18 @@ export default function Lobby() {
           transition={{ duration: 0.9, ease: [0.16, 1, 0.3, 1] }}
           className="text-center mb-12"
         >
-          <h1 className="font-display font-black text-7xl md:text-9xl leading-none">
+          <h1 className="font-display font-black text-6xl sm:text-7xl md:text-9xl leading-none">
             <span
               className="text-cyber-pink neon-text"
               style={{ textShadow: "0 0 12px #ff2bd6, 0 0 32px #ff2bd6, 0 0 64px #ff2bd6" }}
             >
-              NEON
+              HALO
             </span>{" "}
             <span
               className="text-cyber-cyan neon-text"
               style={{ textShadow: "0 0 12px #00e5ff, 0 0 32px #00e5ff, 0 0 64px #00e5ff" }}
             >
-              SLAM
+              HOCKEY
             </span>
           </h1>
           <motion.div
