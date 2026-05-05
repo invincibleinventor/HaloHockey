@@ -290,33 +290,30 @@ export default function GameRoom({ roomId }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
 
-  // ---- HAND TRACKER: find the <video> bound to localStream and attach. ----
-  // We find it by scanning <video> elements and matching srcObject === localStream
-  // rather than relying on a forwarded ref, because cross-slot ref forwarding has
-  // edge cases that can produce off-by-one slot bindings. This is bulletproof.
+  // ---- HAND TRACKER: bind to the <video data-feed="local"> element. ----
+  // Identifying the local video by a DOM data attribute is bulletproof — there
+  // is exactly one element in the document with this attribute and it's set
+  // statically in JSX based on which slot owns the local stream.
   useEffect(() => {
     if (!localStream || handStreamRef.current) return;
     let cancelled = false;
     let attempts = 0;
     const tryInit = () => {
       if (cancelled || handStreamRef.current) return;
-      const videos = Array.from(document.querySelectorAll("video"));
-      const target =
-        (localVideoRef.current &&
-          (localVideoRef.current.srcObject as MediaStream | null) === localStream
-          ? localVideoRef.current
-          : null) ||
-        (videos.find((v) => (v as HTMLVideoElement).srcObject === localStream) as
-          | HTMLVideoElement
-          | undefined);
-      if (target && target.readyState >= 1) {
+      const target = document.querySelector(
+        'video[data-feed="local"]'
+      ) as HTMLVideoElement | null;
+      if (target && target.srcObject && target.readyState >= 1) {
         // eslint-disable-next-line no-console
-        console.log("[HandTracker] bound to video, isLocal=", target.srcObject === localStream);
+        console.log(
+          "[HandTracker] bound to video[data-feed=local], srcObject===localStream:",
+          target.srcObject === localStream
+        );
         const hs = new HandStream(target);
         handStreamRef.current = hs;
         hs.start().catch((e) => {
           console.error("hand tracker init failed", e);
-          handStreamRef.current = null; // allow retry via lobby reload
+          handStreamRef.current = null;
           setError(
             "Hand tracker failed to load. " +
               (e?.message || String(e)) +
