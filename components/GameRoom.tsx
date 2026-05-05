@@ -41,7 +41,14 @@ interface Props {
 export default function GameRoom({ roomId }: Props) {
   const router = useRouter();
   const params = useSearchParams();
-  const isHost = params.get("host") === "1";
+  // Lock isHost to mount-time URL. We intentionally don't react to later
+  // URL changes (e.g. our own history.replaceState that strips ?host=1).
+  const [isHost] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      return new URLSearchParams(window.location.search).get("host") === "1";
+    }
+    return params.get("host") === "1";
+  });
   const selfSide: "top" | "bottom" = isHost ? "top" : "bottom";
 
   const [conn, setConn] = useState<ConnState>("init");

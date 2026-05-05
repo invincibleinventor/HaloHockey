@@ -5,17 +5,11 @@ const nextConfig = {
     config.resolve.fallback = { ...config.resolve.fallback, fs: false };
     return config;
   },
-  async headers() {
-    return [
-      {
-        source: "/:path*",
-        headers: [
-          { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
-          { key: "Cross-Origin-Embedder-Policy", value: "credentialless" },
-        ],
-      },
-    ];
-  },
+  // NOTE: We deliberately don't set Cross-Origin-Embedder-Policy.
+  // COEP is needed only for SharedArrayBuffer / multi-threaded WASM, which is
+  // a perf optimization for MediaPipe — not a requirement. Setting it has
+  // historically broken Safari + Firebase + cross-origin model fetches in
+  // unpredictable ways. Single-threaded MediaPipe works fine.
 };
 
 export default nextConfig;
