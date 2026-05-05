@@ -226,7 +226,17 @@ export async function joinRoom(
   if (!db) throw new Error("Firebase not initialized");
 
   const roomRef = doc(db, "rooms", roomId);
-  const snap = await getDoc(roomRef);
+  let snap;
+  try {
+    snap = await getDoc(roomRef);
+  } catch (err: any) {
+    if (err?.code === "permission-denied") {
+      throw new Error(
+        "Firestore denied the read for this room. The Firestore security rules in your Firebase project likely don't allow read on /rooms/*. Open Firebase Console → Firestore → Rules, paste the contents of firestore.rules, and click Publish."
+      );
+    }
+    throw err;
+  }
   if (!snap.exists()) throw new Error("Room not found.");
   const data = snap.data();
   if (!data.offer) throw new Error("Room is not ready yet.");
@@ -273,10 +283,19 @@ export async function joinRoom(
   await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
-  await updateDoc(roomRef, {
-    answer: { type: answer.type, sdp: answer.sdp },
-    status: "active",
-  });
+  try {
+    await updateDoc(roomRef, {
+      answer: { type: answer.type, sdp: answer.sdp },
+      status: "active",
+    });
+  } catch (err: any) {
+    if (err?.code === "permission-denied") {
+      throw new Error(
+        "Firestore denied the write to this room. Update Firestore Rules in your Firebase project to allow write on /rooms/*. Open firestore.rules in this repo, paste it into Firebase Console → Firestore → Rules → Publish."
+      );
+    }
+    throw err;
+  }
 
   const unsubOff = onSnapshot(offerCandidates, (snap) => {
     snap.docChanges().forEach(async (c) => {

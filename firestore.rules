@@ -2,20 +2,11 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Air-hockey signaling room.
-    // Public-by-design: anyone with a 6-char room code can read/write that
-    // room and its candidate subcollections. The room codes are unguessable
-    // enough for casual use; for production add auth + scoped rules.
-    match /rooms/{roomId} {
+    // Allow public read/write under /rooms/* — covers the room doc itself
+    // (e.g. /rooms/ABCDEF) AND every nested candidate subcollection
+    // (e.g. /rooms/ABCDEF/offerCandidates/xyz).
+    match /rooms/{document=**} {
       allow read, write: if true;
-      match /{path=**} {
-        allow read, write: if true;
-      }
-    }
-
-    // Everything else: deny.
-    match /{document=**} {
-      allow read, write: if false;
     }
   }
 }
