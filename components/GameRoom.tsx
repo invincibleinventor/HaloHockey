@@ -303,15 +303,18 @@ export default function GameRoom({ roomId }: Props) {
           | HTMLVideoElement
           | undefined);
       if (target && target.readyState >= 1) {
-        // sanity log — verify in DevTools that this is the LOCAL video
-        // (its srcObject must equal localStream)
         // eslint-disable-next-line no-console
         console.log("[HandTracker] bound to video, isLocal=", target.srcObject === localStream);
         const hs = new HandStream(target);
         handStreamRef.current = hs;
         hs.start().catch((e) => {
           console.error("hand tracker init failed", e);
-          setError("Hand tracker failed to load. Refresh and try again.");
+          handStreamRef.current = null; // allow retry via lobby reload
+          setError(
+            "Hand tracker failed to load. " +
+              (e?.message || String(e)) +
+              " — try a hard refresh (Cmd/Ctrl+Shift+R) or another browser."
+          );
           setConn("error");
         });
         return;

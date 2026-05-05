@@ -12,26 +12,43 @@ const WASM_BASE =
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
+async function createLandmarker(delegate: "GPU" | "CPU"): Promise<HandLandmarker> {
+  const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
+  return HandLandmarker.createFromOptions(fileset, {
+    baseOptions: {
+      modelAssetPath: MODEL_URL,
+      delegate,
+    },
+    numHands: 1,
+    runningMode: "VIDEO",
+    minHandDetectionConfidence: 0.25,
+    minHandPresenceConfidence: 0.2,
+    minTrackingConfidence: 0.2,
+  });
+}
+
 export async function getHandLandmarker(): Promise<HandLandmarker> {
   if (_landmarker) return _landmarker;
   if (_initPromise) return _initPromise;
 
   _initPromise = (async () => {
-    const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
-    const lm = await HandLandmarker.createFromOptions(fileset, {
-      baseOptions: {
-        modelAssetPath: MODEL_URL,
-        delegate: "GPU",
-      },
-      numHands: 1,
-      runningMode: "VIDEO",
-      // looser thresholds so fast/blurry hands still register
-      minHandDetectionConfidence: 0.25,
-      minHandPresenceConfidence: 0.2,
-      minTrackingConfidence: 0.2,
-    });
-    _landmarker = lm;
-    return lm;
+    // Try GPU first (faster), fall back to CPU (universally supported).
+    try {
+      _landmarker = await createLandmarker("GPU");
+    } catch (gpuErr) {
+      console.warn("[HandTracker] GPU delegate failed, falling back to CPU", gpuErr);
+      try {
+        _landmarker = await createLandmarker("CPU");
+      } catch (cpuErr) {
+        _initPromise = null; // allow a retry on next call
+        throw new Error(
+          "MediaPipe failed to initialize on both GPU and CPU. " +
+            "Likely cause: the model/WASM CDN was blocked by your network. " +
+            `Original: ${(cpuErr as Error)?.message || cpuErr}`
+        );
+      }
+    }
+    return _landmarker;
   })();
 
   return _initPromise;
