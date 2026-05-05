@@ -12,8 +12,8 @@ export const ARENA = {
   TOP_LINE: 0.08,
   /** racket can't go below this (bottom player back wall) */
   BOTTOM_LINE: 1.92,
-  PADDLE_R: 0.07,
-  PUCK_R: 0.035,
+  PADDLE_R: 0.085,
+  PUCK_R: 0.038,
 };
 
 export interface PuckState {
@@ -53,9 +53,9 @@ export function freshGame(): GameState {
 }
 
 export function serveTowards(s: GameState, side: "top" | "bottom") {
-  const dir = side === "top" ? -1 : 1; // toward whoever just got scored on
-  const speed = 0.55;
-  const angle = (Math.random() - 0.5) * 0.8; // small horizontal jitter
+  const dir = side === "top" ? -1 : 1;
+  const speed = 0.95;
+  const angle = (Math.random() - 0.5) * 0.8;
   s.puck.x = 0.5;
   s.puck.y = 1.0;
   s.puck.vx = Math.sin(angle) * speed;
@@ -91,8 +91,8 @@ export function stepPhysics(
   p.x += p.vx * dt;
   p.y += p.vy * dt;
 
-  // light damping so puck doesn't drift forever
-  const damp = Math.pow(0.995, dt * 60);
+  // very light damping — keep the puck fast
+  const damp = Math.pow(0.998, dt * 60);
   p.vx *= damp;
   p.vy *= damp;
 
@@ -127,14 +127,17 @@ export function stepPhysics(
       const vDotN = p.vx * nx + p.vy * ny;
       p.vx -= 2 * vDotN * nx;
       p.vy -= 2 * vDotN * ny;
-      // add paddle velocity influence
-      const pvx = (paddle.x - prev.x) / Math.max(dt, 1e-3);
-      const pvy = (paddle.y - prev.y) / Math.max(dt, 1e-3);
-      p.vx += pvx * 0.6;
-      p.vy += pvy * 0.6;
-      // boost a touch
+      // add paddle velocity influence (clamped to avoid teleport pops)
+      const pvxRaw = (paddle.x - prev.x) / Math.max(dt, 1e-3);
+      const pvyRaw = (paddle.y - prev.y) / Math.max(dt, 1e-3);
+      const pvMag = Math.hypot(pvxRaw, pvyRaw);
+      const pvCap = 3.0;
+      const pvk = pvMag > pvCap ? pvCap / pvMag : 1;
+      p.vx += pvxRaw * pvk * 0.85;
+      p.vy += pvyRaw * pvk * 0.85;
+      // boost on hit
       const sp = Math.hypot(p.vx, p.vy);
-      const target = Math.min(sp + 0.06, 1.6);
+      const target = Math.min(sp + 0.12, 2.6);
       const k = target / Math.max(sp, 1e-3);
       p.vx *= k;
       p.vy *= k;

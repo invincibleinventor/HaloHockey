@@ -45,18 +45,30 @@ function noiseBurst(duration: number, gain = 0.3) {
 }
 
 export const sfx = {
-  hit: () => tone(880, 0.08, "square", 0.18, 220),
-  wallBounce: () => tone(440, 0.05, "triangle", 0.12, 360),
+  hit: () => {
+    tone(880, 0.08, "square", 0.22, 320);
+    tone(1320, 0.05, "triangle", 0.1, 700);
+  },
+  wallBounce: () => tone(520, 0.06, "triangle", 0.14, 280),
   goal: () => {
-    tone(220, 0.18, "sawtooth", 0.25, 880);
-    setTimeout(() => tone(660, 0.22, "square", 0.2, 1320), 80);
-    noiseBurst(0.3, 0.18);
+    tone(220, 0.18, "sawtooth", 0.28, 880);
+    setTimeout(() => tone(660, 0.22, "square", 0.22, 1320), 80);
+    setTimeout(() => tone(440, 0.32, "sawtooth", 0.18, 1760), 160);
+    noiseBurst(0.4, 0.2);
   },
-  uiClick: () => tone(720, 0.04, "square", 0.1),
+  uiClick: () => tone(720, 0.04, "square", 0.12),
   uiHover: () => tone(540, 0.025, "sine", 0.06),
-  countdown: () => tone(660, 0.12, "triangle", 0.18),
-  start: () => {
-    tone(440, 0.1, "square", 0.18, 880);
-    setTimeout(() => tone(880, 0.18, "square", 0.18, 1760), 80);
+  countdown: () => {
+    tone(660, 0.1, "triangle", 0.2);
+    tone(990, 0.06, "sine", 0.08, 1320);
   },
+  start: () => {
+    tone(440, 0.1, "square", 0.2, 880);
+    setTimeout(() => tone(880, 0.18, "square", 0.2, 1760), 80);
+    setTimeout(() => tone(1320, 0.22, "sawtooth", 0.16, 2200), 160);
+    noiseBurst(0.18, 0.12);
+  },
+  chat: () => tone(820, 0.05, "sine", 0.09, 1100),
+  mute: () => tone(280, 0.08, "square", 0.14, 140),
+  unmute: () => tone(560, 0.08, "square", 0.14, 880),
 };

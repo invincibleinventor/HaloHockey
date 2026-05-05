@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import GameCanvas, { CanvasFx } from "./GameCanvas";
 import Particles from "./Particles";
 import VideoFeed from "./VideoFeed";
+import Chat, { ChatMessage } from "./Chat";
 import { HandStream, HandSample } from "@/lib/handTracker";
 import {
   ARENA,
@@ -56,8 +57,11 @@ export default function GameRoom({ roomId }: Props) {
   const [diag, setDiag] = useState<string>("");
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [micMuted, setMicMuted] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   // throttled state version that drives React re-renders for the HUD/score
   const [tick, setTick] = useState(0);
+  const chatIdRef = useRef(1);
 
   const fxRef = useRef<CanvasFx | null>(null);
   const stateRef = useRef<GameState>(freshGame());
@@ -73,6 +77,15 @@ export default function GameRoom({ roomId }: Props) {
     top: { x: 0.5, y: ARENA.TOP_LINE + ARENA.PADDLE_R },
     bot: { x: 0.5, y: ARENA.BOTTOM_LINE - ARENA.PADDLE_R },
   });
+  // guest-side authoritative target from latest host puck broadcast
+  const puckTargetRef = useRef<{
+    px: number;
+    py: number;
+    vx: number;
+    vy: number;
+    tx: number;
+    ty: number;
+  } | null>(null);
   const goalServeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null
@@ -104,7 +117,11 @@ export default function GameRoom({ roomId }: Props) {
             frameRate: { ideal: 60, min: 30 },
             facingMode: "user",
           },
-          audio: false,
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
         });
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
@@ -124,20 +141,23 @@ export default function GameRoom({ roomId }: Props) {
             };
           } else if (msg.t === "puck" && !isHost) {
             const s = stateRef.current;
+            // hard-snap on big jumps (serve/goal); store as smoothing target otherwise
             const dx = msg.px - s.puck.x;
             const dy = msg.py - s.puck.y;
-            const distSq = dx * dx + dy * dy;
-            if (distSq > 0.04) {
+            if (dx * dx + dy * dy > 0.06) {
               s.puck.x = msg.px;
               s.puck.y = msg.py;
-            } else {
-              s.puck.x += dx * 0.4;
-              s.puck.y += dy * 0.4;
+              s.topPaddle.x = msg.tx;
+              s.topPaddle.y = msg.ty;
             }
-            s.puck.vx = msg.vx;
-            s.puck.vy = msg.vy;
-            s.topPaddle.x += (msg.tx - s.topPaddle.x) * 0.6;
-            s.topPaddle.y += (msg.ty - s.topPaddle.y) * 0.6;
+            puckTargetRef.current = {
+              px: msg.px,
+              py: msg.py,
+              vx: msg.vx,
+              vy: msg.vy,
+              tx: msg.tx,
+              ty: msg.ty,
+            };
             s.topScore = msg.ts;
             s.bottomScore = msg.bs;
             s.status = msg.st;
@@ -152,9 +172,22 @@ export default function GameRoom({ roomId }: Props) {
             }
             fxRef.current?.shake(22, 480);
             sfx.goal();
+          } else if (msg.t === "hit" && !isHost) {
+            fxRef.current?.burst(msg.x, msg.y, "#ffd400", 22);
+            fxRef.current?.shake(7, 180);
+            sfx.hit();
+          } else if (msg.t === "wall" && !isHost) {
+            fxRef.current?.burst(msg.x, msg.y, "#00e5ff", 10);
+            sfx.wallBounce();
           } else if (msg.t === "leave") {
-            // graceful disconnect from peer
             setConn("peerLeft");
+          } else if (msg.t === "chat" && typeof msg.text === "string") {
+            const text = String(msg.text).slice(0, 240);
+            setChatMessages((prev) => [
+              ...prev.slice(-49),
+              { id: chatIdRef.current++, from: "them", text, ts: Date.now() },
+            ]);
+            sfx.chat();
           }
         };
 
@@ -391,19 +424,18 @@ export default function GameRoom({ roomId }: Props) {
         }
       }
 
-      const op = remoteSampleRef.current;
-      if (op.confidence > 0.05) {
-        const mirroredX = 1 - op.x;
-        if (selfSide === "top") {
+      // Host needs the opponent's hand applied directly (drives physics). Guest
+      // does NOT — the opponent paddle on guest is the host's authoritative
+      // top paddle from the puck broadcast, smoothed in the else branch below.
+      // Updating from the raw hand sample at 60Hz fights with that smoothing.
+      if (isHost) {
+        const op = remoteSampleRef.current;
+        if (op.confidence > 0.05) {
+          const mirroredX = 1 - op.x;
           s.bottomPaddle.x = mirroredX;
           s.bottomPaddle.y =
             1 + ARENA.PADDLE_R + op.y * (ARENA.BOTTOM_LINE - 1 - ARENA.PADDLE_R);
           clampBottomPaddle(s.bottomPaddle);
-        } else {
-          s.topPaddle.x = mirroredX;
-          s.topPaddle.y =
-            ARENA.TOP_LINE + op.y * (1 - ARENA.PADDLE_R - ARENA.TOP_LINE);
-          clampTopPaddle(s.topPaddle);
         }
       }
 
@@ -414,10 +446,14 @@ export default function GameRoom({ roomId }: Props) {
           fxRef.current?.burst(s.puck.x, s.puck.y, "#ffd400", 22);
           fxRef.current?.shake(7, 180);
           sfx.hit();
+          if (peerRef.current)
+            sendDc(peerRef.current, { t: "hit", x: s.puck.x, y: s.puck.y });
         }
         if (r.wallHit) {
           fxRef.current?.burst(s.puck.x, s.puck.y, "#00e5ff", 10);
           sfx.wallBounce();
+          if (peerRef.current)
+            sendDc(peerRef.current, { t: "wall", x: s.puck.x, y: s.puck.y });
         }
         if (r.goal) {
           const who = r.goal;
@@ -450,12 +486,21 @@ export default function GameRoom({ roomId }: Props) {
             }, 1300);
           }
         }
-      } else if (s.status === "playing") {
-        s.puck.x += s.puck.vx * dt;
-        s.puck.y += s.puck.vy * dt;
-        const damp = Math.pow(0.995, dt * 60);
-        s.puck.vx *= damp;
-        s.puck.vy *= damp;
+      } else {
+        // GUEST smoothing: blend velocity toward authoritative target while
+        // integrating locally + gentle position correction. Smooth visuals at
+        // 60Hz broadcasts without ever freezing between packets.
+        const tgt = puckTargetRef.current;
+        if (tgt) {
+          s.puck.vx += (tgt.vx - s.puck.vx) * Math.min(1, dt * 18);
+          s.puck.vy += (tgt.vy - s.puck.vy) * Math.min(1, dt * 18);
+          s.puck.x += s.puck.vx * dt;
+          s.puck.y += s.puck.vy * dt;
+          s.puck.x += (tgt.px - s.puck.x) * Math.min(1, dt * 12);
+          s.puck.y += (tgt.py - s.puck.y) * Math.min(1, dt * 12);
+          s.topPaddle.x += (tgt.tx - s.topPaddle.x) * Math.min(1, dt * 22);
+          s.topPaddle.y += (tgt.ty - s.topPaddle.y) * Math.min(1, dt * 22);
+        }
       }
 
       prevPaddleRef.current.top = { ...s.topPaddle };
@@ -527,6 +572,26 @@ export default function GameRoom({ roomId }: Props) {
     startCountdown();
   };
 
+  const toggleMic = () => {
+    if (!localStream) return;
+    setMicMuted((prev) => {
+      const next = !prev;
+      localStream.getAudioTracks().forEach((t) => (t.enabled = !next));
+      next ? sfx.mute() : sfx.unmute();
+      return next;
+    });
+  };
+
+  const sendChat = (text: string) => {
+    const trimmed = text.trim().slice(0, 240);
+    if (!trimmed) return;
+    setChatMessages((prev) => [
+      ...prev.slice(-49),
+      { id: chatIdRef.current++, from: "me", text: trimmed, ts: Date.now() },
+    ]);
+    if (peerRef.current) sendDc(peerRef.current, { t: "chat", text: trimmed });
+  };
+
   const exit = () => {
     leftIntentionallyRef.current = true;
     try {
@@ -564,6 +629,7 @@ export default function GameRoom({ roomId }: Props) {
           <VideoFeed
             stream={topStream}
             feed={isHost ? "local" : "remote"}
+            muted={isHost ? true : false}
             mirror
           />
           <div className="absolute top-2 left-2 z-20 text-[10px] font-mono tracking-[0.3em] px-2 py-1 bg-black/60 border border-cyber-pink/60 text-cyber-pink">
@@ -578,6 +644,7 @@ export default function GameRoom({ roomId }: Props) {
           <VideoFeed
             stream={bottomStream}
             feed={isHost ? "remote" : "local"}
+            muted={isHost ? false : true}
             mirror
           />
           <div className="absolute bottom-2 left-2 z-20 text-[10px] font-mono tracking-[0.3em] px-2 py-1 bg-black/60 border border-cyber-cyan/60 text-cyber-cyan">
@@ -588,6 +655,31 @@ export default function GameRoom({ roomId }: Props) {
         <div className="relative w-full" style={{ height: "7%" }} />
 
         <GameCanvas read={read} selfSide={selfSide} fxRef={fxRef} holeFraction={0.07} />
+
+        {/* MIC TOGGLE — only meaningful once we have a peer */}
+        {(conn === "ready" ||
+          conn === "waiting" ||
+          conn === "connecting") && (
+          <button
+            onClick={toggleMic}
+            className={
+              "absolute bottom-3 left-3 z-40 px-3 py-2 border bg-black/70 backdrop-blur-sm font-mono text-[10px] tracking-[0.3em] " +
+              (micMuted
+                ? "border-cyber-red/70 text-cyber-red"
+                : "border-cyber-cyan/70 text-cyber-cyan hover:text-white")
+            }
+            title={micMuted ? "Unmute mic" : "Mute mic"}
+          >
+            {micMuted ? "✕ MIC OFF" : "● MIC ON"}
+          </button>
+        )}
+
+        {/* TEXT CHAT */}
+        {(conn === "ready" ||
+          conn === "waiting" ||
+          conn === "connecting") && (
+          <Chat messages={chatMessages} onSend={sendChat} />
+        )}
 
         {/* HUD */}
         <div className="absolute top-1 left-1/2 -translate-x-1/2 z-40 flex gap-2 items-center text-[10px] font-mono tracking-[0.3em] pointer-events-none">

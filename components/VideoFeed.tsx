@@ -7,6 +7,9 @@ interface Props {
   /** "local" or "remote" — added as a data attribute to the <video> element so
    *  the GameRoom can find the correct element via a stable DOM query. */
   feed: "local" | "remote";
+  /** mute the audio of this <video> element. local feed must be muted to avoid
+   *  feedback; remote feed should be unmuted so we can hear the peer. */
+  muted?: boolean;
   mirror?: boolean;
   className?: string;
 }
@@ -14,6 +17,7 @@ interface Props {
 export default function VideoFeed({
   stream,
   feed,
+  muted = true,
   mirror = true,
   className = "",
 }: Props) {
@@ -40,7 +44,7 @@ export default function VideoFeed({
       ref={ref}
       autoPlay
       playsInline
-      muted
+      muted={muted}
       data-feed={feed}
       className={
         (mirror ? "video-mirror " : "") +

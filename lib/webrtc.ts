@@ -57,7 +57,17 @@ export interface PeerHandle {
 }
 
 export interface DataPayload {
-  t: "hand" | "puck" | "score" | "ready" | "reset" | "ping";
+  t:
+    | "hand"
+    | "puck"
+    | "score"
+    | "ready"
+    | "reset"
+    | "ping"
+    | "leave"
+    | "chat"
+    | "hit"
+    | "wall";
   [k: string]: any;
 }
 
