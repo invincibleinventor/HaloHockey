@@ -1,19 +1,23 @@
 "use client";
 
-import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { useEffect, useRef } from "react";
 
 interface Props {
   stream: MediaStream | null;
+  /** "local" or "remote" — added as a data attribute to the <video> element so
+   *  the GameRoom can find the correct element via a stable DOM query. */
+  feed: "local" | "remote";
   mirror?: boolean;
   className?: string;
 }
 
-const VideoFeed = forwardRef<HTMLVideoElement, Props>(function VideoFeed(
-  { stream, mirror = true, className = "" },
-  externalRef
-) {
+export default function VideoFeed({
+  stream,
+  feed,
+  mirror = true,
+  className = "",
+}: Props) {
   const ref = useRef<HTMLVideoElement>(null);
-  useImperativeHandle(externalRef, () => ref.current as HTMLVideoElement);
 
   useEffect(() => {
     const v = ref.current;
@@ -24,7 +28,6 @@ const VideoFeed = forwardRef<HTMLVideoElement, Props>(function VideoFeed(
     if (stream) {
       const tryPlay = () => v.play().catch(() => {});
       tryPlay();
-      // some browsers need a nudge after metadata is available
       v.onloadedmetadata = tryPlay;
     }
     return () => {
@@ -38,6 +41,7 @@ const VideoFeed = forwardRef<HTMLVideoElement, Props>(function VideoFeed(
       autoPlay
       playsInline
       muted
+      data-feed={feed}
       className={
         (mirror ? "video-mirror " : "") +
         "absolute inset-0 w-full h-full object-cover " +
@@ -45,6 +49,5 @@ const VideoFeed = forwardRef<HTMLVideoElement, Props>(function VideoFeed(
       }
     />
   );
-});
+}
 
-export default VideoFeed;
