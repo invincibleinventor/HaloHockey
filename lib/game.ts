@@ -36,6 +36,10 @@ export interface GameState {
   bottomScore: number;
   status: "lobby" | "countdown" | "playing" | "goal" | "over";
   lastScorer: "top" | "bottom" | null;
+  /** seconds remaining in the post-serve grace period — paddles can't hit
+   *  the puck while this is > 0, so a paddle parked at the center line
+   *  can't insta-launch the spawning puck. */
+  serveGrace: number;
 }
 
 export const WIN_SCORE = 7;
@@ -49,6 +53,7 @@ export function freshGame(): GameState {
     bottomScore: 0,
     status: "lobby",
     lastScorer: null,
+    serveGrace: 0,
   };
 }
 
@@ -60,6 +65,7 @@ export function serveTowards(s: GameState, side: "top" | "bottom") {
   s.puck.y = 1.0;
   s.puck.vx = Math.sin(angle) * speed;
   s.puck.vy = dir * Math.cos(angle) * speed;
+  s.serveGrace = 0.4;
 }
 
 export interface StepResult {
@@ -85,6 +91,9 @@ export function stepPhysics(
 ): StepResult {
   const out: StepResult = { paddleHit: null, wallHit: false, goal: null };
   if (s.status !== "playing") return out;
+
+  // tick down serve grace timer
+  if (s.serveGrace > 0) s.serveGrace = Math.max(0, s.serveGrace - dt);
 
   const p = s.puck;
   // integrate
@@ -144,8 +153,12 @@ export function stepPhysics(
       out.paddleHit = label;
     }
   };
-  collide(s.topPaddle, prevTop, "top");
-  collide(s.bottomPaddle, prevBot, "bottom");
+  // skip paddle collision during the serve grace window so a paddle parked
+  // at the center line can't insta-launch the spawning puck
+  if (s.serveGrace <= 0) {
+    collide(s.topPaddle, prevTop, "top");
+    collide(s.bottomPaddle, prevBot, "bottom");
+  }
 
   // goals: puck enters hole strip past racket lines AND goes off the field
   if (p.y < -ARENA.PUCK_R * 0.5) {

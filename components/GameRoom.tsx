@@ -83,6 +83,8 @@ export default function GameRoom({ roomId }: Props) {
   const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null
   );
+  // current countdown number (host-authoritative, broadcast to guest)
+  const countdownNRef = useRef<number | null>(null);
   const failTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const peerEverConnectedRef = useRef(false);
   const leftIntentionallyRef = useRef(false);
@@ -155,6 +157,9 @@ export default function GameRoom({ roomId }: Props) {
             s.bottomScore = msg.bs;
             s.status = msg.st;
             s.lastScorer = msg.ls ?? null;
+            // mirror the host's countdown number on the guest
+            const cd = typeof msg.cd === "number" ? msg.cd : null;
+            setCountdown((prev) => (prev === cd ? prev : cd));
           } else if (msg.t === "score" && !isHost) {
             if (msg.who === "top") {
               fxRef.current?.burst(0.5, 0.05, "#ff2bd6", 80);
@@ -286,7 +291,19 @@ export default function GameRoom({ roomId }: Props) {
         }
       } catch (e: any) {
         console.error(e);
-        setError(e?.message || "Could not start the room.");
+        const name = e?.name || "";
+        let msg = e?.message || "Could not start the room.";
+        if (name === "NotAllowedError" || /permission denied/i.test(msg)) {
+          msg =
+            "Camera & mic access was blocked. Click the camera/lock icon in your browser's URL bar, allow camera + microphone for this site, then click RETRY. " +
+            "If it still fails: check your OS settings (macOS: System Settings → Privacy & Security → Camera; Windows: Settings → Privacy → Camera) and make sure no other app (Zoom/Teams/FaceTime) is using the camera.";
+        } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+          msg = "No camera was found on this device. Connect one and try again.";
+        } else if (name === "NotReadableError") {
+          msg =
+            "The camera is in use by another app (Zoom, Teams, FaceTime, etc.). Close that app and click RETRY.";
+        }
+        setError(msg);
         setConn("error");
       }
     }
@@ -359,11 +376,15 @@ export default function GameRoom({ roomId }: Props) {
   // ---- COUNTDOWN ----
   const [countdown, setCountdown] = useState<number | null>(null);
   const startCountdown = useCallback(() => {
-    if (stateRef.current.status === "playing") return;
+    // only valid from lobby or after a finished match. countdown / playing /
+    // goal states are already mid-flow — re-triggering would reset progress.
+    const st = stateRef.current.status;
+    if (st !== "lobby" && st !== "over") return;
     if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
     stateRef.current = freshGame();
     stateRef.current.status = "countdown";
     let n = 3;
+    countdownNRef.current = n;
     setCountdown(n);
     sfx.countdown();
     countdownIntervalRef.current = setInterval(() => {
@@ -373,11 +394,13 @@ export default function GameRoom({ roomId }: Props) {
           clearInterval(countdownIntervalRef.current);
           countdownIntervalRef.current = null;
         }
+        countdownNRef.current = null;
         setCountdown(null);
         stateRef.current.status = "playing";
         serveTowards(stateRef.current, Math.random() < 0.5 ? "top" : "bottom");
         sfx.start();
       } else {
+        countdownNRef.current = n;
         setCountdown(n);
         sfx.countdown();
       }
@@ -526,6 +549,7 @@ export default function GameRoom({ roomId }: Props) {
           bs: s.bottomScore,
           st: s.status,
           ls: s.lastScorer,
+          cd: countdownNRef.current,
         });
       }
 
