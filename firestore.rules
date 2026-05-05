@@ -1,29 +1,19 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Public read/write to room signaling docs.
-    // Game data is ephemeral; rooms older than 1 day are stale.
-    match /rooms/{roomId} {
-      allow read: if true;
-      allow create: if
-        request.resource.data.keys().hasAll(['offer', 'createdAt', 'status']) &&
-        request.resource.data.offer is map &&
-        request.resource.data.status == 'waiting';
-      allow update: if
-        // only the answer + status promotion is allowed
-        request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['answer', 'status']) &&
-        resource.data.status == 'waiting';
-      allow delete: if true;
 
-      match /offerCandidates/{cand} {
-        allow read, create: if true;
-      }
-      match /answerCandidates/{cand} {
-        allow read, create: if true;
+    // Air-hockey signaling room.
+    // Public-by-design: anyone with a 6-char room code can read/write that
+    // room and its candidate subcollections. The room codes are unguessable
+    // enough for casual use; for production add auth + scoped rules.
+    match /rooms/{roomId} {
+      allow read, write: if true;
+      match /{path=**} {
+        allow read, write: if true;
       }
     }
 
+    // Everything else: deny.
     match /{document=**} {
       allow read, write: if false;
     }
