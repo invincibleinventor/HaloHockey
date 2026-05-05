@@ -283,16 +283,45 @@ export default function GameRoom({ roomId }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
 
-  // ---- HAND TRACKER: bind to local video element once stream is up ----
+  // ---- HAND TRACKER: find the <video> bound to localStream and attach. ----
+  // We find it by scanning <video> elements and matching srcObject === localStream
+  // rather than relying on a forwarded ref, because cross-slot ref forwarding has
+  // edge cases that can produce off-by-one slot bindings. This is bulletproof.
   useEffect(() => {
-    if (!localStream || !localVideoRef.current || handStreamRef.current) return;
-    const hs = new HandStream(localVideoRef.current);
-    handStreamRef.current = hs;
-    hs.start().catch((e) => {
-      console.error("hand tracker init failed", e);
-      setError("Hand tracker failed to load. Refresh and try again.");
-      setConn("error");
-    });
+    if (!localStream || handStreamRef.current) return;
+    let cancelled = false;
+    let attempts = 0;
+    const tryInit = () => {
+      if (cancelled || handStreamRef.current) return;
+      const videos = Array.from(document.querySelectorAll("video"));
+      const target =
+        (localVideoRef.current &&
+          (localVideoRef.current.srcObject as MediaStream | null) === localStream
+          ? localVideoRef.current
+          : null) ||
+        (videos.find((v) => (v as HTMLVideoElement).srcObject === localStream) as
+          | HTMLVideoElement
+          | undefined);
+      if (target && target.readyState >= 1) {
+        // sanity log — verify in DevTools that this is the LOCAL video
+        // (its srcObject must equal localStream)
+        // eslint-disable-next-line no-console
+        console.log("[HandTracker] bound to video, isLocal=", target.srcObject === localStream);
+        const hs = new HandStream(target);
+        handStreamRef.current = hs;
+        hs.start().catch((e) => {
+          console.error("hand tracker init failed", e);
+          setError("Hand tracker failed to load. Refresh and try again.");
+          setConn("error");
+        });
+        return;
+      }
+      if (attempts++ < 200) setTimeout(tryInit, 50);
+    };
+    tryInit();
+    return () => {
+      cancelled = true;
+    };
   }, [localStream]);
 
   // ---- COUNTDOWN ----
@@ -456,6 +485,17 @@ export default function GameRoom({ roomId }: Props) {
         });
       }
 
+      // host auto-starts countdown when BOTH players have a confident hand sample
+      if (
+        isHost &&
+        s.status === "lobby" &&
+        !countdownIntervalRef.current &&
+        (handStreamRef.current?.getSample().confidence ?? 0) > 0.5 &&
+        remoteSampleRef.current.confidence > 0.5
+      ) {
+        startCountdown();
+      }
+
       // throttle React rerenders to ~12Hz; canvas reads state directly via ref
       if (now - lastRender > 80) {
         lastRender = now;
@@ -565,6 +605,37 @@ export default function GameRoom({ roomId }: Props) {
               {diag}
             </span>
           )}
+          {(() => {
+            const myConf = handStreamRef.current?.getSample().confidence ?? 0;
+            const myHasMoved =
+              (handStreamRef.current?.getSample().landmarks ?? 0) > 0;
+            const opConf = remoteSampleRef.current.confidence;
+            const opHasMoved = remoteSampleRef.current.landmarks > 0;
+            return (
+              <>
+                <span
+                  className={
+                    "px-2 py-0.5 border " +
+                    (myConf > 0.5 && myHasMoved
+                      ? "border-cyber-cyan/70 text-cyber-cyan"
+                      : "border-white/30 text-white/40")
+                  }
+                >
+                  MY HAND {myConf > 0.5 && myHasMoved ? "✓" : "—"}
+                </span>
+                <span
+                  className={
+                    "px-2 py-0.5 border " +
+                    (opConf > 0.5 && opHasMoved
+                      ? "border-cyber-pink/70 text-cyber-pink"
+                      : "border-white/30 text-white/40")
+                  }
+                >
+                  OPP HAND {opConf > 0.5 && opHasMoved ? "✓" : "—"}
+                </span>
+              </>
+            );
+          })()}
         </div>
 
         {/* WAITING / CONNECTING OVERLAY */}
