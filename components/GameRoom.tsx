@@ -727,10 +727,20 @@ export default function GameRoom({ roomId }: Props) {
               <div className="text-cyber-red text-2xl font-display tracking-widest">
                 CONNECTION FAILED
               </div>
-              <div className="text-white/70 max-w-md text-sm">{error}</div>
-              <button onClick={exit} className="btn-arcade text-cyber-pink mt-4">
-                ◂ BACK TO LOBBY
-              </button>
+              <div className="text-white/70 max-w-md text-sm whitespace-pre-line">{error}</div>
+              <div className="flex gap-3 mt-4">
+                <button
+                  onClick={() => {
+                    if (typeof window !== "undefined") window.location.reload();
+                  }}
+                  className="btn-arcade text-cyber-cyan"
+                >
+                  ↻ RETRY
+                </button>
+                <button onClick={exit} className="btn-arcade text-cyber-pink">
+                  ◂ BACK TO LOBBY
+                </button>
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
