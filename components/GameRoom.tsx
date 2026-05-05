@@ -263,12 +263,12 @@ export default function GameRoom({ roomId }: Props) {
             return;
           }
           peerRef.current = handle;
-          // strip ?host=1 so host can share bare /room/CODE
-          if (typeof window !== "undefined") {
-            const u = new URL(window.location.href);
-            u.search = "";
-            history.replaceState({}, "", u.toString());
-          }
+          // NOTE: Do NOT strip ?host=1 from the URL. In Next.js the
+          // useSearchParams hook can re-evaluate on history changes, flipping
+          // isHost mid-session. That swaps the data-feed attribute, slot
+          // streams, and selfSide — and breaks paddle control. The friend
+          // joins by typing the 6-char code into the lobby, not by visiting
+          // the host's URL, so the trailing ?host=1 is harmless.
         } else {
           setConn("connecting");
           const handle = await joinRoom(roomId, stream, {
